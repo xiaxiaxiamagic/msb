@@ -1,9 +1,12 @@
 import backtrader as bt
 import yfinance as yf
-import matplotlib.pyplot as plt
+import datetime
+import os
+import csv
 
-# 马丁策略
+# 创建一个马丁策略类
 class MartingaleStrategy(bt.Strategy):
+    # 定义策略的默认参数
     params = (
         ('rsi_period', 14),
         ('macd_short', 12),
@@ -11,81 +14,108 @@ class MartingaleStrategy(bt.Strategy):
         ('macd_signal', 9),
         ('rsi_overbought', 70),
         ('rsi_oversold', 30),
-        ('initial_cash', 10000),  # 初始资金
-        ('risk_per_trade', 0.1),  # 每次交易的风险比例
-        ('max_loss', 0.1),  # 最大亏损限制（10%）
-        ('max_profit', 5.0),  # 最大利润限制（500%）
+        ('initial_cash', 10000),
+        ('risk_per_trade', 0.1),
+        ('max_loss', 0.1),
+        ('max_profit', 5.0),
     )
 
     def __init__(self):
-        # RSI和MACD指标
-        self.rsi = bt.indicators.RSI(self.data.close, period=self.params.rsi_period)
+        # 初始化指标
+        self.rsi = bt.indicators.RSI(self.data.close, period=self.p.rsi_period)
         self.macd = bt.indicators.MACD(self.data.close, 
-                                       fastperiod=self.params.macd_short,
-                                       slowperiod=self.params.macd_long,
-                                       signalperiod=self.params.macd_signal)
-        self.candle_count = 0  # 用于记录已开仓的次数，控制马丁策略
-        self.initial_balance = self.broker.get_cash()  # 初始余额
-        self.max_balance = self.initial_balance * (1 + self.params.max_profit)  # 最大可接受的利润
-        self.min_balance = self.initial_balance * (1 - self.params.max_loss)  # 最大可接受的亏损
+                                       fastperiod=self.p.macd_short, 
+                                       slowperiod=self.p.macd_long, 
+                                       signalperiod=self.p.macd_signal)
+        self.macd_hist = self.macd.histo
+        self.cash = self.broker.get_cash()
+
+        # 交易日志
+        self.trade_log = []
 
     def next(self):
-        # 获取当前的资金状况
-        current_balance = self.broker.get_cash()
-
-        # 如果达到最大亏损限制，停止交易
-        if current_balance <= self.min_balance:
-            print(f"最大亏损限制已触发，当前余额：{current_balance}")
-            self.close()
-            return
-
-        # 如果达到最大盈利限制，停止交易
-        if current_balance >= self.max_balance:
-            print(f"最大盈利限制已触发，当前余额：{current_balance}")
-            self.close()
-            return
-
-        # 交易信号：MACD金叉和RSI超卖
-        if self.macd.macd > self.macd.signal and self.rsi < self.params.rsi_oversold:
-            size = self.calculate_order_size()
+        if self.rsi < self.p.rsi_oversold and self.macd_hist > 0:
+            if self.position:
+                return
+            size = self.calculate_position_size()
             self.buy(size=size)
-            self.candle_count += 1
-            print(f"买入：{self.data.datetime.datetime()}, 当前仓位：{size}, 当前余额：{current_balance}")
-
-        # 交易信号：MACD死叉和RSI超买
-        elif self.macd.macd < self.macd.signal and self.rsi > self.params.rsi_overbought:
-            size = self.calculate_order_size()
-            self.sell(size=size)
-            self.candle_count += 1
-            print(f"卖出：{self.data.datetime.datetime()}, 当前仓位：{size}, 当前余额：{current_balance}")
-
-    def calculate_order_size(self):
-        """根据马丁策略计算每次交易的仓位"""
-        available_cash = self.broker.get_cash()
-        risk_amount = available_cash * self.params.risk_per_trade
-        order_size = risk_amount / self.data.close[0]  # 假设每股价格就是当前的收盘价
-        return order_size
-
-# 主函数：执行回测
-if __name__ == '__main__':
-    stock_code = input("请输入股票代码: ").strip().upper()  # 输入股票代码
+            self.trade_log.append((self.data.datetime.datetime(0), 'buy', self.data.close[0], size))
+        
+        elif self.rsi > self.p.rsi_overbought and self.macd_hist < 0:
+            if not self.position:
+                return
+            self.sell(size=self.position.size)
+            self.trade_log.append((self.data.datetime.datetime(0), 'sell', self.data.close[0], self.position.size))
     
-    # 下载数据
-    data = bt.feeds.YahooFinanceData(dataname=stock_code, fromdate="2018-01-01", todate="2025-01-01")
+    def calculate_position_size(self):
+        risk_amount = self.cash * self.p.risk_per_trade
+        size = risk_amount / self.data.close[0]
+        return size
 
-    # 创建回测引擎
+    def stop(self):
+        # 计算回测最终结果
+        print(f"Final Portfolio Value: {self.broker.get_value()}")
+        # 保存交易记录到CSV文件
+        self.save_trade_log_to_csv()
+
+    def save_trade_log_to_csv(self):
+        filename = 'backtest_results.csv'
+        with open(filename, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['Date', 'Signal', 'Price', 'Size'])
+            for log in self.trade_log:
+                writer.writerow(log)
+        print(f"Trade log saved to {filename}")
+
+def run_backtest():
+    # 获取用户输入的参数
+    ticker = input("请输入股票代码（例如: AAPL）：")
+    start_date = input("请输入回测开始日期（格式: YYYY-MM-DD）：")
+    end_date = input("请输入回测结束日期（格式: YYYY-MM-DD）：")
+    initial_cash = float(input("请输入初始资金（默认10000）：") or 10000)
+    rsi_period = int(input("请输入RSI周期（默认14）：") or 14)
+    macd_short = int(input("请输入MACD短期周期（默认12）：") or 12)
+    macd_long = int(input("请输入MACD长期周期（默认26）：") or 26)
+    macd_signal = int(input("请输入MACD信号线周期（默认9）：") or 9)
+    rsi_oversold = int(input("请输入RSI超卖阈值（默认30）：") or 30)
+    rsi_overbought = int(input("请输入RSI超买阈值（默认70）：") or 70)
+    risk_per_trade = float(input("请输入每次交易风险比例（默认0.1）：") or 0.1)
+    max_loss = float(input("请输入最大亏损比例（默认0.1）：") or 0.1)
+    max_profit = float(input("请输入最大盈利比例（默认5.0）：") or 5.0)
+
+    # 创建一个Cerebro实例
     cerebro = bt.Cerebro()
-    cerebro.adddata(data)
-    cerebro.addstrategy(MartingaleStrategy)
-    cerebro.broker.set_cash(10000)  # 初始资金
-    cerebro.broker.set_commission(commission=0.001)  # 设置手续费
 
-    # 执行回测
-    print("开始回测...")
+    # 设置初始资金
+    cerebro.broker.set_cash(initial_cash)
+
+    # 获取历史数据
+    data = bt.feeds.YahooFinanceData(dataname=ticker,
+                                     fromdate=datetime.datetime.strptime(start_date, "%Y-%m-%d"),
+                                     todate=datetime.datetime.strptime(end_date, "%Y-%m-%d"))
+
+    cerebro.adddata(data)
+    
+    # 添加策略
+    cerebro.addstrategy(MartingaleStrategy,
+                        rsi_period=rsi_period,
+                        macd_short=macd_short,
+                        macd_long=macd_long,
+                        macd_signal=macd_signal,
+                        rsi_oversold=rsi_oversold,
+                        rsi_overbought=rsi_overbought,
+                        risk_per_trade=risk_per_trade,
+                        max_loss=max_loss,
+                        max_profit=max_profit)
+
+    # 设置手续费
+    cerebro.broker.set_commission(commission=0.001)
+
+    # 启动回测
     cerebro.run()
 
-    # 可视化结果
-    cerebro.plot(style='candlestick')
+def main():
+    run_backtest()
 
-    # 打印回测结束时的余额
-    print(f"回测结束时的账户余额: {cerebro.broker.get_value():.2f}")
+if __name__ == '__main__':
+    main()
