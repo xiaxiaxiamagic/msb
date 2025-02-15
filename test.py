@@ -1,7 +1,6 @@
-import backtrader as bt
 import yfinance as yf
+import backtrader as bt
 import datetime
-import os
 import csv
 
 # 创建一个马丁策略类
@@ -28,24 +27,22 @@ class MartingaleStrategy(bt.Strategy):
                                        slowperiod=self.p.macd_long, 
                                        signalperiod=self.p.macd_signal)
         self.macd_hist = self.macd.histo
-        self.cash = self.broker.get_cash()
-
-        # 交易日志
         self.trade_log = []
 
     def next(self):
+        self.cash = self.broker.get_cash()  # 更新现金余额
         if self.rsi < self.p.rsi_oversold and self.macd_hist > 0:
             if self.position:
                 return
             size = self.calculate_position_size()
             self.buy(size=size)
-            self.trade_log.append((self.data.datetime.datetime(0), 'buy', self.data.close[0], size))
+            self.trade_log.append((self.data.datetime.date(0), 'buy', self.data.close[0], size))
         
         elif self.rsi > self.p.rsi_overbought and self.macd_hist < 0:
             if not self.position:
                 return
             self.sell(size=self.position.size)
-            self.trade_log.append((self.data.datetime.datetime(0), 'sell', self.data.close[0], self.position.size))
+            self.trade_log.append((self.data.datetime.date(0), 'sell', self.data.close[0], self.position.size))
     
     def calculate_position_size(self):
         risk_amount = self.cash * self.p.risk_per_trade
@@ -60,9 +57,10 @@ class MartingaleStrategy(bt.Strategy):
 
     def save_trade_log_to_csv(self):
         filename = 'backtest_results.csv'
-        with open(filename, mode='w', newline='') as file:
+        with open(filename, mode='a', newline='') as file:  # 改为追加模式
             writer = csv.writer(file)
-            writer.writerow(['Date', 'Signal', 'Price', 'Size'])
+            if file.tell() == 0:  # 如果文件为空，写入标题
+                writer.writerow(['Date', 'Signal', 'Price', 'Size'])
             for log in self.trade_log:
                 writer.writerow(log)
         print(f"Trade log saved to {filename}")
@@ -90,11 +88,23 @@ def run_backtest():
     cerebro.broker.set_cash(initial_cash)
 
     # 获取历史数据
-    data = bt.feeds.YahooFinanceData(dataname=ticker,
-                                     fromdate=datetime.datetime.strptime(start_date, "%Y-%m-%d"),
-                                     todate=datetime.datetime.strptime(end_date, "%Y-%m-%d"))
+    data = yf.download(ticker, start=start_date, end=end_date)
 
-    cerebro.adddata(data)
+    # 检查数据是否成功获取
+    if data.empty:
+        print("未能成功获取数据，请检查股票代码和日期范围")
+        return
+
+    # 确保数据包含所有必要的列：Open, High, Low, Close, Volume, Adj Close
+    if 'Adj Close' not in data.columns:
+        data['Adj Close'] = data['Close']  # 如果没有 Adj Close 列，使用 Close 列作为 Adj Close
+
+    data = data[['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']]
+
+    # 将数据传入Backtrader的PandasData
+    data_feed = bt.feeds.PandasData(dataname=data)
+
+    cerebro.adddata(data_feed)
     
     # 添加策略
     cerebro.addstrategy(MartingaleStrategy,
@@ -109,7 +119,7 @@ def run_backtest():
                         max_profit=max_profit)
 
     # 设置手续费
-    cerebro.broker.set_commission(commission=0.001)
+    cerebro.broker.setcommission(commission=0.001)
 
     # 启动回测
     cerebro.run()
