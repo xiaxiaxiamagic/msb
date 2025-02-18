@@ -2,15 +2,17 @@ import yfinance as yf
 import backtrader as bt
 import datetime
 import csv
+import pandas as pd
+import time  # 导入time模块以使用sleep函数
 
 # 创建一个马丁策略类
 class MartingaleStrategy(bt.Strategy):
     # 定义策略的默认参数
     params = (
         ('rsi_period', 14),
-        ('macd_short', 12),
-        ('macd_long', 26),
-        ('macd_signal', 9),
+        ('macd_short', 12),  # 原fastperiod
+        ('macd_long', 26),   # 原slowperiod
+        ('macd_signal', 9),  # 原signalperiod
         ('rsi_overbought', 70),
         ('rsi_oversold', 30),
         ('initial_cash', 10000),
@@ -22,11 +24,13 @@ class MartingaleStrategy(bt.Strategy):
     def __init__(self):
         # 初始化指标
         self.rsi = bt.indicators.RSI(self.data.close, period=self.p.rsi_period)
-        self.macd = bt.indicators.MACD(self.data.close, 
-                                       fastperiod=self.p.macd_short, 
-                                       slowperiod=self.p.macd_long, 
-                                       signalperiod=self.p.macd_signal)
-        self.macd_hist = self.macd.histo
+
+        # 修改MACD的参数名
+        self.macd = bt.indicators.MACD(self.data.close,
+                                       period_me1=self.p.macd_short,  # 替换fastperiod
+                                       period_me2=self.p.macd_long,   # 替换slowperiod
+                                       period_signal=self.p.macd_signal)  # 替换signalperiod
+        self.macd_hist = self.macd.lines.macd - self.macd.lines.signal  # 计算MACD柱状图
         self.trade_log = []
 
     def next(self):
@@ -87,19 +91,37 @@ def run_backtest():
     # 设置初始资金
     cerebro.broker.set_cash(initial_cash)
 
-    # 获取历史数据
-    data = yf.download(ticker, start=start_date, end=end_date)
+    try:
+        # 获取历史数据
+        data = yf.download(ticker, start=start_date, end=end_date)
+    except Exception as e:
+        print(f"下载数据失败: {e}")
+        return
 
     # 检查数据是否成功获取
     if data.empty:
         print("未能成功获取数据，请检查股票代码和日期范围")
         return
 
+    # 检查是否是MultiIndex，如果是，重置列名
+    if isinstance(data.columns, pd.MultiIndex):
+        # 提取MultiIndex的第一级列名
+        data.columns = data.columns.get_level_values(0)
+    
     # 确保数据包含所有必要的列：Open, High, Low, Close, Volume, Adj Close
     if 'Adj Close' not in data.columns:
         data['Adj Close'] = data['Close']  # 如果没有 Adj Close 列，使用 Close 列作为 Adj Close
 
     data = data[['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']]
+
+    # 打印data的类型和前几行数据，以检查格式
+    print(f"数据类型: {type(data)}")
+    print(f"数据内容: {data.head()}")
+
+    # 确保数据长度足够
+    if len(data) < max(rsi_period, macd_short, macd_long):
+        print(f"数据长度不足，至少需要 {max(rsi_period, macd_short, macd_long)} 条数据。")
+        return
 
     # 将数据传入Backtrader的PandasData
     data_feed = bt.feeds.PandasData(dataname=data)
@@ -123,6 +145,9 @@ def run_backtest():
 
     # 启动回测
     cerebro.run()
+
+    # 增加延迟（避免频繁请求）
+    time.sleep(5)  # 每次请求后暂停5秒
 
 def main():
     run_backtest()
